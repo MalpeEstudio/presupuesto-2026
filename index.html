@@ -508,9 +508,16 @@
             color: #999;
             font-size: 12px;
         }
+
+        /* HISTÓRICO / NAS */
+        .app-toolbar{max-width:1400px;margin:0 auto 20px;background:#fff;border-radius:12px;padding:14px 16px;box-shadow:0 8px 32px rgba(0,0,0,.1);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.toolbar-left,.toolbar-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.nas-status{font-size:12px;font-weight:700;padding:7px 10px;border-radius:999px;background:#f1f1f1;color:#666}.nas-status.connected{background:#e9f8f3;color:#168567}.btn-secondary{background:#f1f1f4;color:#222}.btn-history{background:#111;color:#fff}.btn-save{background:#00a982;color:#fff;width:100%;margin-bottom:10px}.history-panel{max-width:1400px;margin:0 auto 20px;background:#fff;border-radius:12px;padding:20px;box-shadow:0 8px 32px rgba(0,0,0,.1);display:none}.history-panel.visible{display:block}.history-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}.history-head h2{font-size:20px;color:#222}.history-search{max-width:340px}.history-table-wrap{overflow-x:auto}.history-table{width:100%;border-collapse:collapse;min-width:760px}.history-table th,.history-table td{padding:11px 10px;border-bottom:1px solid #ececec;text-align:left;font-size:12px;color:#333;vertical-align:middle}.history-table th{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#777;background:#fafafa}.history-actions{display:flex;gap:6px;flex-wrap:wrap}.history-actions button{padding:7px 9px;font-size:11px}.btn-edit{background:#6633ff;color:#fff}.btn-duplicate{background:#ece9ff;color:#5c2ce6}.btn-pdf{background:#e9f8f3;color:#137b60}.btn-delete{background:#ffecec;color:#c33}.history-empty{text-align:center;padding:28px;color:#888;font-size:13px}.current-budget{font-size:12px;color:#6633ff;font-weight:700}@media(max-width:900px){.container{grid-template-columns:1fr}}
     </style>
 </head>
 <body>
+
+    <div class="app-toolbar"><div class="toolbar-left"><button class="btn-secondary" onclick="newBudget()">＋ Nuevo presupuesto</button><button class="btn-history" onclick="toggleHistory()">📚 Histórico</button><span id="currentBudgetLabel" class="current-budget"></span></div><div class="toolbar-right"><span id="nasStatus" class="nas-status">NAS no conectado</span><button class="btn-secondary" onclick="connectNAS()">📁 Conectar carpeta NAS</button></div></div>
+    <div id="historyPanel" class="history-panel"><div class="history-head"><h2>Histórico de presupuestos</h2><input id="historySearch" class="history-search" type="text" placeholder="Buscar por cliente, número o proyecto..." oninput="renderHistory()"></div><div class="history-table-wrap"><table class="history-table"><thead><tr><th>Nº</th><th>Fecha</th><th>Cliente</th><th>Proyecto</th><th>Total</th><th>Acciones</th></tr></thead><tbody id="historyBody"></tbody></table></div></div>
+
     <div class="container">
         <!-- FORMULARIO -->
         <div class="form-section">
@@ -544,6 +551,7 @@
             
             <button class="btn-add" onclick="addService()">+ Agregar Servicio</button>
             
+            <button class="btn-save" onclick="saveBudget()">💾 Guardar presupuesto</button>
             <button class="btn-download" onclick="downloadPDF()">📥 Descargar Presupuesto</button>
         </div>
         
@@ -822,85 +830,45 @@
             document.getElementById('pdf-content').innerHTML = html;
         }
         
-        async function downloadPDF() {
-            if (services.length === 0) {
-                alert('⚠️ Agrega al menos un servicio para generar el presupuesto');
-                return;
-            }
 
-            const clientName = document.getElementById('clientName').value || 'cliente';
-            const element = document.getElementById('pdf-content');
-            const button = document.querySelector('.btn-download');
-            const originalText = button.innerHTML;
+        // ===== NAS / HISTÓRICO =====
+        let nasDirectoryHandle=null, historyItems=[], currentBudgetFile=null, currentBudgetNumber=null;
+        const DB_NAME='malpe-presupuestos-db', DB_STORE='handles', DB_KEY='nas-root';
+        function openHandleDB(){return new Promise((resolve,reject)=>{const r=indexedDB.open(DB_NAME,1);r.onupgradeneeded=()=>{const db=r.result;if(!db.objectStoreNames.contains(DB_STORE))db.createObjectStore(DB_STORE)};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}
+        async function rememberDirectoryHandle(h){const db=await openHandleDB();await new Promise((resolve,reject)=>{const tx=db.transaction(DB_STORE,'readwrite');tx.objectStore(DB_STORE).put(h,DB_KEY);tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});db.close()}
+        async function getRememberedDirectoryHandle(){try{const db=await openHandleDB();const h=await new Promise((resolve,reject)=>{const tx=db.transaction(DB_STORE,'readonly');const r=tx.objectStore(DB_STORE).get(DB_KEY);r.onsuccess=()=>resolve(r.result||null);r.onerror=()=>reject(r.error)});db.close();return h}catch{return null}}
+        async function ensurePermission(h,ask=true){if(!h)return false;const o={mode:'readwrite'};if(await h.queryPermission(o)==='granted')return true;if(!ask)return false;return await h.requestPermission(o)==='granted'}
+        function updateNASStatus(ok,text){const e=document.getElementById('nasStatus');e.textContent=text||(ok?'NAS conectado':'NAS no conectado');e.classList.toggle('connected',!!ok)}
+        async function connectNAS(){if(!('showDirectoryPicker'in window)){alert('Usa Google Chrome o Microsoft Edge en el ordenador para conectar la carpeta del NAS.');return false}try{const h=await showDirectoryPicker({mode:'readwrite'});if(!await ensurePermission(h,true))throw Error('No se concedió permiso de escritura.');await h.getDirectoryHandle('PDF',{create:true});await h.getDirectoryHandle('Datos',{create:true});nasDirectoryHandle=h;await rememberDirectoryHandle(h);updateNASStatus(true,'NAS conectado: '+h.name);await loadHistory();return true}catch(e){if(e?.name==='AbortError')return false;alert('No se pudo conectar el NAS: '+(e.message||e));return false}}
+        async function requireNAS(){if(nasDirectoryHandle&&await ensurePermission(nasDirectoryHandle,true))return true;const h=await getRememberedDirectoryHandle();if(h&&await ensurePermission(h,true)){nasDirectoryHandle=h;updateNASStatus(true,'NAS conectado: '+h.name);return true}return connectNAS()}
+        async function readJsonFile(h){const f=await h.getFile();return JSON.parse(await f.text())}
+        function totals(items=services){const subtotal=items.reduce((s,x)=>s+(Number(x.quantity)||1)*(Number(x.price)||0),0),iva=subtotal*.21;return{subtotal,iva,total:subtotal+iva}}
+        function safeFilePart(v){return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[<>:"/\\|?*\x00-\x1F]/g,'').replace(/\s+/g,' ').trim().slice(0,80)||'cliente'}
+        async function nextBudgetNumber(){const y=new Date().getFullYear();let m=0;for(const x of historyItems){const z=String(x.number||'').match(new RegExp('^P-'+y+'-(\\d+)$'));if(z)m=Math.max(m,+z[1])}return `P-${y}-${String(m+1).padStart(3,'0')}`}
+        function collectBudgetData(){const t=totals();return{version:1,number:currentBudgetNumber,clientName:clientName.value.trim(),clientInfo:clientInfo.value.trim(),notes:notes.value,showSubtotal:showSubtotal.checked,services:JSON.parse(JSON.stringify(services)),...t}}
+        async function saveBudget(opt={}){const silent=!!opt.silent;if(!clientName.value.trim()){if(!silent)alert('Indica el nombre del cliente.');return false}if(!services.length){if(!silent)alert('Agrega al menos un servicio.');return false}if(!await requireNAS())return false;try{await loadHistory(false);if(!currentBudgetNumber)currentBudgetNumber=await nextBudgetNumber();const now=new Date(),data=collectBudgetData();data.number=currentBudgetNumber;data.updatedAt=now.toISOString();if(!currentBudgetFile){data.createdAt=now.toISOString();currentBudgetFile=`${currentBudgetNumber}.json`}else{const p=historyItems.find(x=>x.__fileName===currentBudgetFile);data.createdAt=p?.createdAt||now.toISOString();data.pdfFileName=p?.pdfFileName||null}const dir=await nasDirectoryHandle.getDirectoryHandle('Datos',{create:true}),fh=await dir.getFileHandle(currentBudgetFile,{create:true}),w=await fh.createWritable();await w.write(JSON.stringify(data,null,2));await w.close();currentBudgetLabel.textContent=`Editando ${currentBudgetNumber}`;await loadHistory(false);if(!silent)alert(`Presupuesto ${currentBudgetNumber} guardado en el NAS.`);return true}catch(e){if(!silent)alert('No se pudo guardar: '+(e.message||e));return false}}
+        async function loadHistory(showErrors=true){if(!nasDirectoryHandle)return;try{if(!await ensurePermission(nasDirectoryHandle,false)){updateNASStatus(false,'NAS: permiso pendiente');return}const dir=await nasDirectoryHandle.getDirectoryHandle('Datos',{create:true}),a=[];for await(const [name,h] of dir.entries()){if(h.kind!=='file'||!name.toLowerCase().endsWith('.json'))continue;try{const d=await readJsonFile(h);d.__fileName=name;a.push(d)}catch{}}a.sort((x,y)=>new Date(y.updatedAt||y.createdAt||0)-new Date(x.updatedAt||x.createdAt||0));historyItems=a;renderHistory()}catch(e){if(showErrors)alert('No se pudo leer el histórico: '+(e.message||e))}}
+        function esc(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;')}
+        function fmtDate(v){if(!v)return'—';const d=new Date(v);return isNaN(d)?'—':d.toLocaleDateString('es-ES')}
+        function fmtMoney(v){return new Intl.NumberFormat('es-ES',{minimumFractionDigits:2,maximumFractionDigits:2}).format(Number(v)||0)+' €'}
+        function renderHistory(){const body=document.getElementById('historyBody');if(!body)return;const q=(historySearch?.value||'').trim().toLowerCase(),a=historyItems.filter(x=>!q||[x.number,x.clientName,x.clientInfo].join(' ').toLowerCase().includes(q));if(!a.length){body.innerHTML=`<tr><td colspan="6" class="history-empty">${nasDirectoryHandle?'No hay presupuestos guardados.':'Conecta la carpeta del NAS para ver el histórico.'}</td></tr>`;return}body.innerHTML=a.map(x=>`<tr><td><strong>${esc(x.number||'—')}</strong></td><td>${esc(fmtDate(x.updatedAt||x.createdAt))}</td><td>${esc(x.clientName||'—')}</td><td>${esc(x.clientInfo||'—')}</td><td><strong>${esc(fmtMoney(x.total))}</strong></td><td><div class="history-actions"><button class="btn-edit" onclick="editBudget('${encodeURIComponent(x.__fileName)}')">Editar</button><button class="btn-duplicate" onclick="duplicateBudget('${encodeURIComponent(x.__fileName)}')">Duplicar</button><button class="btn-pdf" onclick="downloadSavedPDF('${encodeURIComponent(x.__fileName)}')">PDF</button><button class="btn-delete" onclick="deleteBudget('${encodeURIComponent(x.__fileName)}')">Eliminar</button></div></td></tr>`).join('')}
+        async function getHistoryItem(n){const d=decodeURIComponent(n);let x=historyItems.find(v=>v.__fileName===d);if(x)return x;const dir=await nasDirectoryHandle.getDirectoryHandle('Datos'),fh=await dir.getFileHandle(d);x=await readJsonFile(fh);x.__fileName=d;return x}
+        function loadBudgetIntoForm(x,dup=false){clientName.value=x.clientName||'';clientInfo.value=x.clientInfo||'';notes.value=x.notes||'';showSubtotal.checked=x.showSubtotal!==false;services=Array.isArray(x.services)?x.services.map(s=>({...s,id:Date.now()+Math.random()})):[];if(!services.length)addService();else renderServices();if(dup){currentBudgetFile=null;currentBudgetNumber=null;currentBudgetLabel.textContent='Duplicado sin guardar'}else{currentBudgetFile=x.__fileName;currentBudgetNumber=x.number||null;currentBudgetLabel.textContent=currentBudgetNumber?`Editando ${currentBudgetNumber}`:''}updatePreview();historyPanel.classList.remove('visible');scrollTo({top:0,behavior:'smooth'})}
+        async function editBudget(n){if(!await requireNAS())return;try{loadBudgetIntoForm(await getHistoryItem(n),false)}catch(e){alert('No se pudo abrir: '+(e.message||e))}}
+        async function duplicateBudget(n){if(!await requireNAS())return;try{loadBudgetIntoForm(await getHistoryItem(n),true)}catch(e){alert('No se pudo duplicar: '+(e.message||e))}}
+        async function deleteBudget(n){if(!await requireNAS())return;const d=decodeURIComponent(n),x=historyItems.find(v=>v.__fileName===d);if(!confirm(`¿Eliminar ${x?.number||'este presupuesto'} del histórico?`))return;try{const dir=await nasDirectoryHandle.getDirectoryHandle('Datos');await dir.removeEntry(d);if(currentBudgetFile===d){currentBudgetFile=null;currentBudgetNumber=null;currentBudgetLabel.textContent=''}await loadHistory(false)}catch(e){alert('No se pudo eliminar: '+(e.message||e))}}
+        function newBudget(){if(!confirm('¿Crear un presupuesto nuevo? Los cambios no guardados se perderán.'))return;currentBudgetFile=null;currentBudgetNumber=null;services=[];clientName.value='';clientInfo.value='';notes.value='';showSubtotal.checked=true;currentBudgetLabel.textContent='';addService();updatePreview()}
+        async function toggleHistory(){const p=historyPanel,open=!p.classList.contains('visible');if(open){if(!await requireNAS())return;await loadHistory()}p.classList.toggle('visible')}
+        async function createPDFBlob(){const e=document.getElementById('pdf-content');if(typeof html2canvas!=='function')throw Error('No se pudo cargar html2canvas');if(!(window.jspdf&&window.jspdf.jsPDF))throw Error('No se pudo cargar jsPDF');const imgs=[...e.querySelectorAll('img')];await Promise.all(imgs.map(i=>i.complete?Promise.resolve():new Promise(r=>{i.onload=r;i.onerror=r})));const c=await html2canvas(e,{scale:2,useCORS:true,logging:false,backgroundColor:'#fff',width:e.scrollWidth,height:e.scrollHeight,scrollX:0,scrollY:0,windowWidth:e.scrollWidth,windowHeight:e.scrollHeight});const img=c.toDataURL('image/jpeg',.98),{jsPDF}=window.jspdf,pdf=new jsPDF({orientation:'portrait',unit:'mm',format:'a4',compress:true});pdf.addImage(img,'JPEG',0,0,210,297,undefined,'FAST');return pdf.output('blob')}
+        function downloadBlob(blob,name){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),1500)}
+        async function savePDFToNAS(blob,name){const dir=await nasDirectoryHandle.getDirectoryHandle('PDF',{create:true}),fh=await dir.getFileHandle(name,{create:true}),w=await fh.createWritable();await w.write(blob);await w.close()}
+        async function downloadPDF(){if(!services.length){alert('⚠️ Agrega al menos un servicio para generar el presupuesto');return}const b=document.querySelector('.btn-download'),old=b.innerHTML;try{b.disabled=true;b.innerHTML='⏳ Generando PDF...';let registered=false;try{if(await requireNAS())registered=await saveBudget({silent:true})}catch{}const blob=await createPDFBlob(),name=`${currentBudgetNumber?currentBudgetNumber+' - ':''}${safeFilePart(clientName.value||'cliente')}.pdf`;if(registered&&nasDirectoryHandle){await savePDFToNAS(blob,name);try{const dir=await nasDirectoryHandle.getDirectoryHandle('Datos'),fh=await dir.getFileHandle(currentBudgetFile),d=await readJsonFile(fh);d.pdfFileName=name;d.updatedAt=new Date().toISOString();const w=await fh.createWritable();await w.write(JSON.stringify(d,null,2));await w.close();await loadHistory(false)}catch{}}downloadBlob(blob,name)}catch(e){alert('No se pudo generar el PDF: '+(e.message||e))}finally{b.disabled=false;b.innerHTML=old}}
+        async function downloadSavedPDF(n){if(!await requireNAS())return;try{const x=await getHistoryItem(n);if(!x.pdfFileName){alert('Este presupuesto todavía no tiene PDF guardado. Ábrelo con “Editar” y pulsa “Descargar Presupuesto”.');return}const dir=await nasDirectoryHandle.getDirectoryHandle('PDF'),fh=await dir.getFileHandle(x.pdfFileName),f=await fh.getFile();downloadBlob(f,x.pdfFileName)}catch(e){alert('No se pudo abrir el PDF: '+(e.message||e))}}
+        async function initNAS(){renderHistory();try{const h=await getRememberedDirectoryHandle();if(!h)return;nasDirectoryHandle=h;if(await ensurePermission(h,false)){updateNASStatus(true,'NAS conectado: '+h.name);await loadHistory(false)}else updateNASStatus(false,'NAS guardado · pulsa conectar')}catch{}}
 
-            try {
-                button.disabled = true;
-                button.innerHTML = '⏳ Generando PDF...';
-
-                if (typeof html2canvas !== 'function') {
-                    // Fallback: usar html2pdf directamente si html2canvas no está expuesto globalmente
-                    if (typeof html2pdf === 'function') {
-                        const fallbackOpt = {
-                            margin: [0, 0, 0, 0],
-                            filename: `presupuesto-${clientName.toLowerCase().replace(/\s+/g, '-')}.pdf`,
-                            image: { type: 'jpeg', quality: 0.98 },
-                            html2canvas: { scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff' },
-                            jsPDF: { orientation: 'portrait', unit: 'mm', format: 'a4' }
-                        };
-                        await html2pdf().set(fallbackOpt).from(element).save();
-                        return;
-                    }
-                    throw new Error('No se pudo cargar html2canvas');
-                }
-                if (!(window.jspdf && window.jspdf.jsPDF)) {
-                    throw new Error('No se pudo cargar jsPDF');
-                }
-
-                const images = Array.from(element.querySelectorAll('img'));
-                await Promise.all(images.map(img => {
-                    if (img.complete) return Promise.resolve();
-                    return new Promise(resolve => {
-                        img.onload = resolve;
-                        img.onerror = resolve;
-                    });
-                }));
-
-                const canvas = await html2canvas(element, {
-                    scale: 2,
-                    useCORS: true,
-                    logging: false,
-                    backgroundColor: '#ffffff',
-                    width: element.scrollWidth,
-                    height: element.scrollHeight,
-                    scrollX: 0,
-                    scrollY: 0,
-                    windowWidth: element.scrollWidth,
-                    windowHeight: element.scrollHeight
-                });
-
-                const imgData = canvas.toDataURL('image/jpeg', 0.98);
-                const { jsPDF } = window.jspdf;
-
-                const pdf = new jsPDF({
-                    orientation: 'portrait',
-                    unit: 'mm',
-                    format: 'a4',
-                    compress: true
-                });
-
-                pdf.addImage(imgData, 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
-                pdf.save(`presupuesto-${clientName.toLowerCase().replace(/\s+/g, '-')}.pdf`);
-            } catch (error) {
-                console.error(error);
-                alert('No se pudo generar el PDF: ' + (error && error.message ? error.message : error));
-            } finally {
-                button.disabled = false;
-                button.innerHTML = originalText;
-            }
-        }
-        
         // Inicializar
         addService();
+        initNAS();
     </script>
 </body>
 </html>
